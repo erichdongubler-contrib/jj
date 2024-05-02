@@ -44,6 +44,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * New command `jj operation diff` that can compare changes made between two
   operations.
 
+* New command `jj operation show` that can show the changes made in a single
+  operation.
+
 ### Fixed bugs
 
 ## [0.19.0] - 2024-07-03

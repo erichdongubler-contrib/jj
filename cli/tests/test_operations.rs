@@ -993,6 +993,383 @@ fn test_op_diff_patch() {
     "###);
 }
 
+#[test]
+fn test_op_show() {
+    let test_env = TestEnvironment::default();
+    let git_repo_path = test_env.env_root().join("git-repo");
+    let git_repo = init_bare_git_repo(&git_repo_path);
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "clone", "git-repo", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    // Overview of op log.
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "log"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    @  984d5ceb039f test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
+    │  check out git remote's default branch
+    │  args: jj git clone git-repo repo
+    ◉  817baaeefcbb test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
+    │  fetch from git remote into empty repo
+    │  args: jj git clone git-repo repo
+    ◉  b51416386f26 test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
+    │  add workspace 'default'
+    ◉  9a7d829846af test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
+    │  initialize repo
+    ◉  000000000000 root()
+    "###);
+
+    // The root operation is empty.
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["op", "show", "0000000"]);
+    insta::assert_snapshot!(&stderr, @r###"
+    Error: Cannot show the root operation
+    "###);
+
+    // Showing the latest operation.
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show", "@"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    984d5ceb039f test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
+    check out git remote's default branch
+    args: jj git clone git-repo repo
+
+    Changed commits:
+    ○  Change sqpuoqvxutmz
+       +sqpuoqvx 9708515f (empty) (no description set)
+    ○  Change qpvuntsmwlqt
+       -qpvuntsm hidden 230dd059 (empty) (no description set)
+
+    Changed local branches:
+    branch-1:
+    + ulyvmwyz 1d843d1f branch-1 | Commit 1
+    - (absent)
+
+    Changed remote branches:
+    branch-1@origin:
+    + (tracked) ulyvmwyz 1d843d1f branch-1 | Commit 1
+    - (untracked) ulyvmwyz 1d843d1f branch-1 | Commit 1
+    "###);
+    // `jj op show @` should behave identically to `jj op show`.
+    let stdout_without_op_id = test_env.jj_cmd_success(&repo_path, &["op", "show"]);
+    assert_eq!(stdout, stdout_without_op_id);
+
+    // Showing a given operation.
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show", "@-"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    817baaeefcbb test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
+    fetch from git remote into empty repo
+    args: jj git clone git-repo repo
+
+    Changed commits:
+    ○  Change tqyxmsztkvot
+       +tqyxmszt 3e785984 branch-3@origin | Commit 3
+    ○  Change yuvsmzqkmpws
+       +yuvsmzqk 3d9189bc branch-2@origin | Commit 2
+    ○  Change ulyvmwyzwuwt
+       +ulyvmwyz 1d843d1f branch-1@origin | Commit 1
+
+    Changed remote branches:
+    branch-1@origin:
+    + (untracked) ulyvmwyz 1d843d1f branch-1@origin | Commit 1
+    - (untracked) (absent)
+    branch-2@origin:
+    + (untracked) yuvsmzqk 3d9189bc branch-2@origin | Commit 2
+    - (untracked) (absent)
+    branch-3@origin:
+    + (untracked) tqyxmszt 3e785984 branch-3@origin | Commit 3
+    - (untracked) (absent)
+    "###);
+
+    // Create a conflicted branch using a concurrent operation.
+    test_env.jj_cmd_ok(
+        &repo_path,
+        &[
+            "branch",
+            "set",
+            "branch-1",
+            "-r",
+            "branch-2@origin",
+            "--at-op",
+            "@-",
+        ],
+    );
+    let (_, stderr) = test_env.jj_cmd_ok(&repo_path, &["log"]);
+    insta::assert_snapshot!(&stderr, @r###"
+    Concurrent modification detected, resolving automatically.
+    "###);
+    // Showing a merge operation is empty.
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    6c131cd79314 test-username@host.example.com 2001-02-03 04:05:14.000 +07:00 - 2001-02-03 04:05:14.000 +07:00
+    resolve concurrent operations
+    args: jj log
+    "###);
+
+    // Test fetching from git remote.
+    modify_git_repo(git_repo);
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["git", "fetch"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    "###);
+    insta::assert_snapshot!(&stderr, @r###"
+    branch: branch-1@origin [updated] tracked
+    branch: branch-2@origin [updated] untracked
+    branch: branch-3@origin [deleted] untracked
+    Abandoned 1 commits that are no longer reachable.
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    84466f397d80 test-username@host.example.com 2001-02-03 04:05:16.000 +07:00 - 2001-02-03 04:05:16.000 +07:00
+    fetch from git remote(s) origin
+    args: jj git fetch
+
+    Changed commits:
+    ○  Change qzxslznxxpoz
+       +qzxslznx d487febd branch-2@origin | Commit 5
+    ○  Change slvtnnzxztqy
+       +slvtnnzx 4f856199 branch-1?? branch-1@origin | Commit 4
+    ○  Change tqyxmsztkvot
+       -tqyxmszt hidden 3e785984 Commit 3
+
+    Changed local branches:
+    branch-1:
+    + (added) slvtnnzx 4f856199 branch-1?? branch-1@origin | Commit 4
+    + (added) yuvsmzqk 3d9189bc branch-1?? | Commit 2
+    - (added) ulyvmwyz 1d843d1f Commit 1
+    - (added) yuvsmzqk 3d9189bc branch-1?? | Commit 2
+
+    Changed remote branches:
+    branch-1@origin:
+    + (tracked) slvtnnzx 4f856199 branch-1?? branch-1@origin | Commit 4
+    - (tracked) ulyvmwyz 1d843d1f Commit 1
+    branch-2@origin:
+    + (untracked) qzxslznx d487febd branch-2@origin | Commit 5
+    - (untracked) yuvsmzqk 3d9189bc branch-1?? | Commit 2
+    branch-3@origin:
+    + (untracked) (absent)
+    - (untracked) tqyxmszt hidden 3e785984 Commit 3
+    "###);
+
+    // Test creation of branch.
+    let (stdout, stderr) = test_env.jj_cmd_ok(
+        &repo_path,
+        &["branch", "create", "branch-2", "-r", "branch-2@origin"],
+    );
+    insta::assert_snapshot!(&stdout, @r###"
+    "###);
+    insta::assert_snapshot!(&stderr, @r###"
+    Created 1 branches pointing to qzxslznx d487febd branch-2 branch-2@origin | Commit 5
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    eea894b7c72f test-username@host.example.com 2001-02-03 04:05:18.000 +07:00 - 2001-02-03 04:05:18.000 +07:00
+    create branch branch-2 pointing to commit d487febd08e690ee775a4e0387e30d544307e409
+    args: jj branch create branch-2 -r branch-2@origin
+
+    Changed local branches:
+    branch-2:
+    + qzxslznx d487febd branch-2 branch-2@origin | Commit 5
+    - (absent)
+    "###);
+
+    // Test tracking of branch.
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["branch", "track", "branch-2@origin"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    "###);
+    insta::assert_snapshot!(&stderr, @r###"
+    Started tracking 1 remote branches.
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    d2d43732186a test-username@host.example.com 2001-02-03 04:05:20.000 +07:00 - 2001-02-03 04:05:20.000 +07:00
+    track remote branch branch-2@origin
+    args: jj branch track branch-2@origin
+
+    Changed remote branches:
+    branch-2@origin:
+    + (tracked) qzxslznx d487febd branch-2 | Commit 5
+    - (untracked) qzxslznx d487febd branch-2 | Commit 5
+    "###);
+
+    // Test creation of new commit.
+    let (stdout, stderr) =
+        test_env.jj_cmd_ok(&repo_path, &["new", "branch-1@origin", "-m", "new commit"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    "###);
+    insta::assert_snapshot!(&stderr, @r###"
+    Working copy now at: nkmrtpmo 71fe694d (empty) new commit
+    Parent commit      : slvtnnzx 4f856199 branch-1?? branch-1@origin | Commit 4
+    Added 1 files, modified 0 files, removed 1 files
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    f85f06d144b6 test-username@host.example.com 2001-02-03 04:05:22.000 +07:00 - 2001-02-03 04:05:22.000 +07:00
+    new empty commit
+    args: jj new branch-1@origin -m 'new commit'
+
+    Changed commits:
+    ○  Change nkmrtpmomlro
+       +nkmrtpmo 71fe694d (empty) new commit
+    ○  Change sqpuoqvxutmz
+       -sqpuoqvx hidden 9708515f (empty) (no description set)
+    "###);
+
+    // Test updating of local branch.
+    let (stdout, stderr) =
+        test_env.jj_cmd_ok(&repo_path, &["branch", "set", "branch-1", "-r", "@"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    "###);
+    insta::assert_snapshot!(&stderr, @r###"
+    Moved 1 branches to nkmrtpmo 71fe694d branch-1* | (empty) new commit
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    b55c8d9fdc63 test-username@host.example.com 2001-02-03 04:05:24.000 +07:00 - 2001-02-03 04:05:24.000 +07:00
+    point branch branch-1 to commit 71fe694da7811a184f404fffe35cd62b0adb3d89
+    args: jj branch set branch-1 -r @
+
+    Changed local branches:
+    branch-1:
+    + nkmrtpmo 71fe694d branch-1* | (empty) new commit
+    - (added) slvtnnzx 4f856199 branch-1@origin | Commit 4
+    - (added) yuvsmzqk 3d9189bc Commit 2
+    "###);
+
+    // Test deletion of local branch.
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["branch", "delete", "branch-2"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    "###);
+    insta::assert_snapshot!(&stderr, @r###"
+    Deleted 1 branches.
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    25dbc902dbf0 test-username@host.example.com 2001-02-03 04:05:26.000 +07:00 - 2001-02-03 04:05:26.000 +07:00
+    delete branch branch-2
+    args: jj branch delete branch-2
+
+    Changed local branches:
+    branch-2:
+    + (absent)
+    - qzxslznx d487febd branch-2@origin | Commit 5
+    "###);
+
+    // Test pushing to Git remote.
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["git", "push", "--tracked"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    "###);
+    insta::assert_snapshot!(&stderr, @r###"
+    Branch changes to push to origin:
+      Move forward branch branch-1 from 4f856199edbf to 71fe694da781
+      Delete branch branch-2 from d487febd08e6
+    Warning: The working-copy commit in workspace 'default' became immutable, so a new commit has been created on top of it.
+    Working copy now at: wvuyspvk 6136f89a (empty) (no description set)
+    Parent commit      : nkmrtpmo 71fe694d branch-1 | (empty) new commit
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    d8d2184e1621 test-username@host.example.com 2001-02-03 04:05:28.000 +07:00 - 2001-02-03 04:05:28.000 +07:00
+    push all tracked branches to git remote origin
+    args: jj git push --tracked
+
+    Changed commits:
+    ○  Change wvuyspvkupzz
+       +wvuyspvk 6136f89a (empty) (no description set)
+
+    Changed remote branches:
+    branch-1@origin:
+    + (tracked) nkmrtpmo 71fe694d branch-1 | (empty) new commit
+    - (tracked) slvtnnzx 4f856199 Commit 4
+    branch-2@origin:
+    + (untracked) (absent)
+    - (tracked) qzxslznx d487febd Commit 5
+    "###);
+}
+
+#[test]
+fn test_op_show_patch() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    // Update working copy with a single file and create new commit.
+    std::fs::write(repo_path.join("file"), "a").unwrap();
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["new"]);
+    insta::assert_snapshot!(&stdout, @"");
+    insta::assert_snapshot!(&stderr, @r###"
+    Working copy now at: rlvkpnrz 3444613f (empty) (no description set)
+    Parent commit      : qpvuntsm f3220d78 (no description set)
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show", "@-", "-p"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    816a0ba42aa6 test-username@host.example.com 2001-02-03 04:05:08.000 +07:00 - 2001-02-03 04:05:08.000 +07:00
+    snapshot working copy
+    args: jj new
+
+    Changed commits:
+    ○  Change qpvuntsmwlqt
+       +qpvuntsm f3220d78 (no description set)
+       -qpvuntsm hidden 230dd059 (empty) (no description set)
+       Added regular file file:
+               1: a
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show", "@", "-p"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    64bb2702ac30 test-username@host.example.com 2001-02-03 04:05:08.000 +07:00 - 2001-02-03 04:05:08.000 +07:00
+    new empty commit
+    args: jj new
+
+    Changed commits:
+    ○  Change rlvkpnrzqnoo
+       +rlvkpnrz 3444613f (empty) (no description set)
+    "###);
+
+    // Squash the working copy commit.
+    std::fs::write(repo_path.join("file"), "b").unwrap();
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["squash"]);
+    insta::assert_snapshot!(&stdout, @"");
+    insta::assert_snapshot!(&stderr, @r###"
+    Working copy now at: mzvwutvl fec3065d (empty) (no description set)
+    Parent commit      : qpvuntsm 8514f5b4 (no description set)
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show", "-p"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    f40519d9c6c3 test-username@host.example.com 2001-02-03 04:05:11.000 +07:00 - 2001-02-03 04:05:11.000 +07:00
+    squash commits into f3220d78b25353bd8fd65988018004b962d0894a
+    args: jj squash
+
+    Changed commits:
+    ○  Change mzvwutvlkqwt
+    │  +mzvwutvl fec3065d (empty) (no description set)
+    │ ○  Change rlvkpnrzqnoo
+    ├─╯  -rlvkpnrz hidden e358ef7d (no description set)
+    │    Modified regular file file:
+    │       1    1: ab
+    ○  Change qpvuntsmwlqt
+       +qpvuntsm 8514f5b4 (no description set)
+       -qpvuntsm hidden f3220d78 (no description set)
+       Modified regular file file:
+          1    1: ab
+    "###);
+
+    // Abandon the working copy commit.
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["abandon"]);
+    insta::assert_snapshot!(&stdout, @"");
+    insta::assert_snapshot!(&stderr, @r###"
+    Abandoned commit mzvwutvl fec3065d (empty) (no description set)
+    Working copy now at: yqosqzyt fa39592f (empty) (no description set)
+    Parent commit      : qpvuntsm 8514f5b4 (no description set)
+    "###);
+    let stdout = test_env.jj_cmd_success(&repo_path, &["op", "show", "-p"]);
+    insta::assert_snapshot!(&stdout, @r###"
+    318c9022ebc5 test-username@host.example.com 2001-02-03 04:05:13.000 +07:00 - 2001-02-03 04:05:13.000 +07:00
+    abandon commit fec3065ddf4c348827a1e8eee6c49db252135023
+    args: jj abandon
+
+    Changed commits:
+    ○  Change yqosqzytrlsw
+       +yqosqzyt fa39592f (empty) (no description set)
+    ○  Change mzvwutvlkqwt
+       -mzvwutvl hidden fec3065d (empty) (no description set)
+    "###);
+}
+
 fn init_bare_git_repo(git_repo_path: &Path) -> git2::Repository {
     let git_repo = git2::Repository::init_bare(git_repo_path).unwrap();
     let git_blob_oid = git_repo.blob(b"some content").unwrap();
