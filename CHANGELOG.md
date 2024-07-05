@@ -33,6 +33,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * `jj backout` now includes the backed out commit's subject in the new commit
   message.
 
+* `jj describe` can now update the description of multiple commits.
+
 ### Fixed bugs
 
 ## [0.19.0] - 2024-07-03
