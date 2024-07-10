@@ -17,6 +17,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecations
 
+* The original configuration syntax for `jj fix` is now deprecated in favor of
+  one that allows defining multiple tools that can affect different filesets.
+  These can be used in combination for now. See `jj help fix` for details.
+
 ### New features
 
 * External diff tools can now be configured to invoke the tool on each file
@@ -45,6 +49,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pattern kind with `-i`. `mine()` uses case‐insensitive matching on your email
   address unconditionally. Only ASCII case folding is currently implemented,
   but this will likely change in the future.
+
+* `jj fix` can now be configured to run different tools on different filesets.
+  This simplifies the use case of configuring code formatters for specific file
+  types. See `jj help fix` for details.
 
 ### Fixed bugs
 

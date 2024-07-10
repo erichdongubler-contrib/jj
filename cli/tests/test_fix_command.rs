@@ -16,6 +16,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use gix::bstr::ByteVec;
 use itertools::Itertools;
 use jj_lib::file_util::try_symlink;
 
@@ -30,6 +31,9 @@ fn init_with_fake_formatter(args: &[&str]) -> (TestEnvironment, PathBuf) {
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
     let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+    // The deprecated configuration syntax is still used by tests where it doesn't
+    // make a meaningful difference in coverage. Otherwise, we would have to add
+    // dedicated test coverage for the deprecated syntax until it is removed.
     test_env.add_config(&format!(
         r#"fix.tool-command = ["{}"]"#,
         [escaped_formatter_path.as_str()]
@@ -41,16 +45,327 @@ fn init_with_fake_formatter(args: &[&str]) -> (TestEnvironment, PathBuf) {
 }
 
 #[test]
-fn test_fix_no_config() {
+fn test_config_no_tools() {
     let test_env = TestEnvironment::default();
-    test_env.jj_cmd_ok(test_env.env_root(), &["init", "repo", "--git"]);
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
     let repo_path = test_env.env_root().join("repo");
-    let stderr = test_env.jj_cmd_failure(&repo_path, &["fix", "-s", "@"]);
+
+    std::fs::write(repo_path.join("file"), "content\n").unwrap();
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["fix"]);
     insta::assert_snapshot!(stderr, @r###"
-    Config error: Invalid `fix.tool-command`
-    Caused by: configuration property "fix.tool-command" not found
+    Config error: At least one entry of `fix.tools` or `fix.tool-command` is required.
     For help, see https://github.com/martinvonz/jj/blob/main/docs/config.md.
     "###);
+
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
+    insta::assert_snapshot!(content, @"content\n");
+}
+
+#[test]
+fn test_config_both_legacy_and_table_tools() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
+    assert!(formatter_path.is_file());
+    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+    test_env.add_config(&format!(
+        r###"
+        [fix]
+        tool-command = ["{formatter}", "--append", "legacy change"]
+
+        [[fix.tools]]
+        name = "tool-1"
+        command = ["{formatter}", "--append", "tables change"]
+        patterns = ["tables-file"]
+        "###,
+        formatter = escaped_formatter_path.as_str()
+    ));
+
+    std::fs::write(repo_path.join("legacy-file"), "legacy content\n").unwrap();
+    std::fs::write(repo_path.join("tables-file"), "tables content\n").unwrap();
+
+    let (_stdout, _stderr) = test_env.jj_cmd_ok(&repo_path, &["fix"]);
+
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "legacy-file", "-r", "@"]);
+    insta::assert_snapshot!(content, @r###"
+    legacy content
+    legacy change
+    "###);
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "tables-file", "-r", "@"]);
+    insta::assert_snapshot!(content, @r###"
+    tables content
+    legacy change
+    tables change
+    "###);
+}
+
+#[test]
+fn test_config_multiple_tools() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+    let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
+    assert!(formatter_path.is_file());
+    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+    test_env.add_config(&format!(
+        r###"
+        [[fix.tools]]
+        name = "tool-1"
+        command = ["{formatter}", "--uppercase"]
+        patterns = ["foo"]
+
+        [[fix.tools]]
+        name = "tool-2"
+        command = ["{formatter}", "--lowercase"]
+        patterns = ["bar"]
+        "###,
+        formatter = escaped_formatter_path.as_str()
+    ));
+
+    std::fs::write(repo_path.join("foo"), "Foo\n").unwrap();
+    std::fs::write(repo_path.join("bar"), "Bar\n").unwrap();
+    std::fs::write(repo_path.join("baz"), "Baz\n").unwrap();
+
+    let (_stdout, _stderr) = test_env.jj_cmd_ok(&repo_path, &["fix"]);
+
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "foo", "-r", "@"]);
+    insta::assert_snapshot!(content, @"FOO\n");
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "bar", "-r", "@"]);
+    insta::assert_snapshot!(content, @"bar\n");
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "baz", "-r", "@"]);
+    insta::assert_snapshot!(content, @"Baz\n");
+}
+
+#[test]
+fn test_config_multiple_tools_with_same_name() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+    let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
+    assert!(formatter_path.is_file());
+    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+
+    // Multiple definitions with the same `name` are not allowed, because it is
+    // likely to be a mistake, and mistakes are risky when they rewrite files.
+    test_env.add_config(&format!(
+        r###"
+        [[fix.tools]]
+        name = "my-tool"
+        command = ["{formatter}", "--uppercase"]
+        patterns = ["foo"]
+
+        [[fix.tools]]
+        name = "my-tool"
+        command = ["{formatter}", "--lowercase"]
+        patterns = ["bar"]
+        "###,
+        formatter = escaped_formatter_path.as_str()
+    ));
+
+    std::fs::write(repo_path.join("foo"), "Foo\n").unwrap();
+    std::fs::write(repo_path.join("bar"), "Bar\n").unwrap();
+
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["fix"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Config error: `fix.tools` entries at indices 0 and 1 have the same `name`: my-tool
+    For help, see https://github.com/martinvonz/jj/blob/main/docs/config.md.
+    "###);
+
+    let content = std::fs::read(repo_path.join("foo"))
+        .unwrap()
+        .into_string()
+        .unwrap();
+    insta::assert_snapshot!(content, @"Foo\n");
+    let content = std::fs::read(repo_path.join("bar"))
+        .unwrap()
+        .into_string()
+        .unwrap();
+    insta::assert_snapshot!(content, @"Bar\n");
+}
+
+#[test]
+fn test_config_tables_overlapping_patterns() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+    let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
+    assert!(formatter_path.is_file());
+    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+
+    test_env.add_config(&format!(
+        r###"
+        [[fix.tools]]
+        name = "tool-1"
+        command = ["{formatter}", "--append", "tool-1"]
+        patterns = ["foo", "bar"]
+
+        [[fix.tools]]
+        name = "tool-2"
+        command = ["{formatter}", "--append", "tool-2"]
+        patterns = ["bar", "baz"]
+        "###,
+        formatter = escaped_formatter_path.as_str()
+    ));
+
+    std::fs::write(repo_path.join("foo"), "foo\n").unwrap();
+    std::fs::write(repo_path.join("bar"), "bar\n").unwrap();
+    std::fs::write(repo_path.join("baz"), "baz\n").unwrap();
+
+    let (_stdout, _stderr) = test_env.jj_cmd_ok(&repo_path, &["fix"]);
+
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "foo", "-r", "@"]);
+    insta::assert_snapshot!(content, @r###"
+    foo
+    tool-1
+    "###);
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "bar", "-r", "@"]);
+    insta::assert_snapshot!(content, @r###"
+    bar
+    tool-1
+    tool-2
+    "###);
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "baz", "-r", "@"]);
+    insta::assert_snapshot!(content, @r###"
+    baz
+    tool-2
+    "###);
+}
+
+#[test]
+fn test_config_tables_all_commands_missing() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+    test_env.add_config(
+        r###"
+        [[fix.tools]]
+        name = "my-tool-missing-command-1"
+        patterns = ["foo"]
+
+        [[fix.tools]]
+        name = "my-tool-missing-command-2"
+        patterns = ['glob:"ba*"']
+        "###,
+    );
+
+    std::fs::write(repo_path.join("foo"), "foo\n").unwrap();
+
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["fix"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Config error: `fix.tools` entry `my-tool-missing-command-1` at index 0 is missing required field `command`.
+    For help, see https://github.com/martinvonz/jj/blob/main/docs/config.md.
+    "###);
+
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "foo", "-r", "@"]);
+    insta::assert_snapshot!(content, @"foo\n");
+}
+
+#[test]
+fn test_config_tables_some_commands_missing() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+    let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
+    assert!(formatter_path.is_file());
+    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+    test_env.add_config(&format!(
+        r###"
+        [[fix.tools]]
+        name = "tool-1"
+        command = ["{formatter}", "--uppercase"]
+        patterns = ["foo"]
+
+        [[fix.tools]]
+        name = "my-tool-missing-command"
+        patterns = ['bar']
+        "###,
+        formatter = escaped_formatter_path.as_str()
+    ));
+
+    std::fs::write(repo_path.join("foo"), "foo\n").unwrap();
+
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["fix"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Config error: `fix.tools` entry `my-tool-missing-command` at index 1 is missing required field `command`.
+    For help, see https://github.com/martinvonz/jj/blob/main/docs/config.md.
+    "###);
+
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "foo", "-r", "@"]);
+    insta::assert_snapshot!(content, @"foo\n");
+}
+
+#[test]
+fn test_config_tables_empty_patterns_list() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+    let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
+    assert!(formatter_path.is_file());
+    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+    test_env.add_config(&format!(
+        r###"
+        [[fix.tools]]
+        name = "my-tool-empty-patterns"
+        command = ["{formatter}", "--uppercase"]
+        patterns = []
+        "###,
+        formatter = escaped_formatter_path.as_str()
+    ));
+
+    std::fs::write(repo_path.join("foo"), "foo\n").unwrap();
+
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["fix"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Config error: `fix.tools` entry `my-tool-empty-patterns` at index 0 must have at least one pattern.
+    For help, see https://github.com/martinvonz/jj/blob/main/docs/config.md.
+    "###);
+
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "foo", "-r", "@"]);
+    insta::assert_snapshot!(content, @"foo\n");
+}
+
+#[test]
+fn test_config_filesets() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+    let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
+    assert!(formatter_path.is_file());
+    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+    test_env.add_config(&format!(
+        r###"
+        [[fix.tools]]
+        name = "my-tool-match-one"
+        command = ["{formatter}", "--uppercase"]
+        patterns = ['glob:"a*"']
+
+        [[fix.tools]]
+        name = "my-tool-match-two"
+        command = ["{formatter}", "--reverse"]
+        patterns = ['glob:"b*"']
+
+        [[fix.tools]]
+        name = "my-tool-match-none"
+        command = ["{formatter}", "--append", "SHOULD NOT APPEAR"]
+        patterns = ['glob:"this-doesnt-match-anything-*"']
+        "###,
+        formatter = escaped_formatter_path.as_str()
+    ));
+
+    std::fs::write(repo_path.join("a1"), "a1\n").unwrap();
+    std::fs::write(repo_path.join("b1"), "b1\n").unwrap();
+    std::fs::write(repo_path.join("b2"), "b2\n").unwrap();
+
+    let (_stdout, _stderr) = test_env.jj_cmd_ok(&repo_path, &["fix"]);
+
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "a1", "-r", "@"]);
+    insta::assert_snapshot!(content, @"A1\n");
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "b1", "-r", "@"]);
+    insta::assert_snapshot!(content, @"1b\n");
+    let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "b2", "-r", "@"]);
+    insta::assert_snapshot!(content, @"2b\n");
 }
 
 #[test]
